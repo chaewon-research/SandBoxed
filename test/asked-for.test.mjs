@@ -302,3 +302,127 @@ test("an unrecognized conditional trigger cannot become automatic shooting", () 
 test("direction-only restrictions do not suppress shooting", () => {
   assert.equal(gun("a gun that shoots only upward").reactions[0].toward, "up");
 });
+
+test("touch-triggered bombs retain the destroyed preset for chain reactions", () => {
+  const result = askedFor(generated(["bomb"]), "a bomb that explodes when touched");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when + ":" + r.do; }),
+    ["touch:explode", "destroyed:explode"]);
+});
+
+test("a model's duplicate bomb reactions do not displace the presets", () => {
+  const result = askedFor(generated(["bomb"], [
+    { when: "touch", do: "explode", radius: 10, damage: 1 },
+    { when: "destroyed", do: "explode", radius: 10, damage: 1 }
+  ]), "a bomb that explodes when touched");
+  assert.deepEqual(result.reactions.map(function (r) { return [r.when, r.do, r.radius, r.damage]; }), [
+    ["touch", "explode", 40, 5], ["destroyed", "explode", 40, 5]
+  ]);
+});
+
+test("non-preset destroyed reactions do not bypass an explicit touch trigger", () => {
+  const result = askedFor(generated([], [
+    { when: "touch", do: "explode" },
+    { when: "destroyed", do: "explode" }
+  ]), "a device that explodes when touched");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when; }), ["touch"]);
+});
+
+test("a clicked bomb retains destroyed preset without an unwanted touch trigger", () => {
+  const result = askedFor(generated(["bomb"], [
+    { when: "click", do: "explode" }
+  ]), "a bomb that explodes when clicked");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when; }), ["destroyed", "click"]);
+});
+
+test("only when touched excludes the destruction preset", () => {
+  const result = askedFor(generated(["bomb"]), "a bomb that explodes only when touched");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when; }), ["touch"]);
+});
+
+test("only when clicked excludes other bomb triggers", () => {
+  const result = askedFor(generated(["bomb"], [{ when: "click", do: "explode" }]),
+    "a bomb that only explodes when clicked");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when; }), ["click"]);
+});
+
+test("explicit destruction exclusion preserves a requested touch explosion", () => {
+  const result = askedFor(generated(["bomb"]), "a bomb that explodes when touched but not when destroyed");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when; }), ["touch"]);
+});
+
+test("another action's exclusive trigger does not disable the bomb chain reaction", () => {
+  const result = askedFor(generated(["bomb"], [{ when: "click", do: "shoot" }]),
+    "a bomb that shoots only when clicked and explodes when touched");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when + ":" + r.do; }),
+    ["touch:explode", "destroyed:explode", "click:shoot"]);
+});
+
+test("an exclusive trigger following an explosion does not disable the bomb preset", () => {
+  const result = askedFor(generated(["bomb"], [{ when: "click", do: "shoot" }]),
+    "a bomb that explodes when touched and shoots only when clicked");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when + ":" + r.do; }),
+    ["touch:explode", "destroyed:explode", "click:shoot"]);
+});
+
+
+test("a bomb that never explodes has no explosion reactions", () => {
+  const result = askedFor(generated(["bomb"]), "a bomb that never explodes");
+  assert.deepEqual(result.reactions, []);
+});
+
+test("a bomb that does not explode has no explosion reactions", () => {
+  const result = askedFor(generated(["bomb"]), "a bomb that does not explode");
+  assert.deepEqual(result.reactions, []);
+});
+
+test("a negative destroyed clause keeps touch explosions", () => {
+  const result = askedFor(generated(["bomb"]),
+    "a bomb that explodes when touched but doesn't explode when destroyed");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when; }), ["touch"]);
+});
+
+test("a spelled-out destroyed exclusion keeps touch explosions", () => {
+  const result = askedFor(generated(["bomb"]),
+    "a bomb that explodes when touched but does not explode when destroyed");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when; }), ["touch"]);
+});
+
+test("a negative touch clause keeps the destroyed bomb preset", () => {
+  const result = askedFor(generated(["bomb"]),
+    "a bomb that does not explode when touched but explodes when destroyed");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when; }), ["destroyed"]);
+});
+
+test("a global explosion exclusion does not remove an unrelated shooting reaction", () => {
+  const result = askedFor(generated(["bomb"], [{ when: "click", do: "shoot" }]),
+    "a bomb that never explodes and shoots when clicked");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when + ":" + r.do; }),
+    ["click:shoot"]);
+});
+
+test("a negative destruction clause only removes destruction-triggered explosions", () => {
+  const result = askedFor(generated([], [
+    { when: "touch", do: "explode" }, { when: "destroyed", do: "explode" }
+  ]), "a device that explodes when touched but not when destroyed");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when; }), ["touch"]);
+});
+
+
+test("negating a destroyed explosion leaves the bomb's touch preset", () => {
+  const result = askedFor(generated(["bomb"]), "a bomb that does not explode when destroyed");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when + ":" + r.do; }),
+    ["touch:explode"]);
+});
+
+test("a negated destruction clause before an explicit touch clause retains touch", () => {
+  const result = askedFor(generated(["bomb"]),
+    "a bomb that never explodes when destroyed but explodes when touched");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when + ":" + r.do; }),
+    ["touch:explode"]);
+});
+
+test("a negated touch clause leaves the bomb's destroyed preset", () => {
+  const result = askedFor(generated(["bomb"]), "a bomb that does not explode when touched");
+  assert.deepEqual(result.reactions.map(function (r) { return r.when + ":" + r.do; }),
+    ["destroyed:explode"]);
+});
