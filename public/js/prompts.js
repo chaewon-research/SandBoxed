@@ -234,7 +234,10 @@ export const behaviorAI = {
             radius: { type: "number" },
             damage: { type: "number" },
             target: { type: "string", enum: targets },
-            toward: { type: "string", enum: directions }
+            toward: { type: "string", enum: directions },
+            speed: { type: "number" },
+            tags: { type: "array", maxItems: 3, items: { type: "string" } },
+            move: { type: "string", enum: moves }
           },
           required: ["when", "do"]
         }
@@ -259,7 +262,10 @@ export const behaviorAI = {
     "reactions, up to " + maxReactions + ": when is click, touch, wall, timer (every: 1 to 30 seconds), " +
     "hurt or destroyed. do is jump, spin, grow, burst, say (one emoji), hide, explode (radius, damage), " +
     "damage, destroy or push (target: self, other or near), shoot (toward: nearest, left, right, up or down) " +
-    "or spawn (one emoji, for example an apple).",
+    "or spawn (one emoji, for example an apple). " +
+    "Shoot and push can use speed: 1 to 10. Shoot, damage, destroy and push can use tags: " +
+    "up to 3 lowercase group names (e.g. animal) to limit their targets. " +
+    "Spawn can use move: one of the movement types listed above.",
 
   examples: [
     { prompt: "a small house", answer: { traits: ["wall"], move: still, effects: [], reactions: [] } },
@@ -366,7 +372,7 @@ const reactionVerbs = {
 };
 
 function reactionClauses(text) {
-  const boundary = /\s+(?:and|then)\s+(?=(?:every\s+\d+(?:\.\d+)?\s+seconds?\s+)?(?:shoot|fire|spawn|drop|push|shove|damage|hurt|destroy|kill|produce|create|lay|explode|say|speak|shout|meow|bark|glow|blink|spin)\w*\b)|[,;]/;
+  const boundary = /\s+(?:and|then|but)\s+(?=(?:every\s+\d+(?:\.\d+)?\s+seconds?\s+)?(?:shoot|fire|spawn|drop|push|shove|damage|hurt|destroy|kill|produce|create|lay|explode|say|speak|shout|meow|bark|glow|blink|spin)\w*\b)|[,;]/;
   return text.split(boundary).map(function (part) { return part.trim(); });
 }
 
@@ -439,12 +445,15 @@ function requestedDirection(text) {
   return null;
 }
 
+const negatedExplosion = /\b(?:never|do(?:es)?\s+not|don['’]t|doesn['’]t|must\s+not|cannot|can['’]t)\s+(?:\w+\s+){0,2}(?:explod\w*|blow(?:s)?\s+up)\b/;
+
 function requestedTrigger(text, action) {
   const clauses = actionClause(text, action);
   if (!clauses.length && action === "shoot" && mentions(text, traitWords.gun)) {
     clauses.push(...reactionClauses(text));
   }
   for (const clause of clauses) {
+    if (action === "explode" && negatedExplosion.test(clause)) continue;
     const match = clause.match(/\b(?:when|on|if)\s+(?:(?:it\s+is|you|someone|the\s+object\s+is)\s+)?(clicked|touched|hurt|destroyed|click|touch)\b/);
     if (match) return ({ clicked: "click", touched: "touch" })[match[1]] || match[1];
   }
@@ -465,6 +474,36 @@ function negatedAction(text, action) {
   return actionClause(text, action).some(function (clause) { return negative.test(clause); });
 }
 
+// A negated explosion may rule out one trigger or the action altogether.
+function excludedExplosions(text) {
+  const triggers = new Set();
+  let all = false;
+  const triggerWords = /^(?:when|on|if)\s+(?:(?:it|the bomb|the object)\s+is\s+)?(touched|clicked|destroyed|hurt)\b/;
+  const names = { touched: "touch", clicked: "click", destroyed: "destroyed", hurt: "hurt" };
+  for (const clause of actionClause(text, "explode")) {
+    const negative = new RegExp(negatedExplosion.source, "g");
+    let match;
+    while ((match = negative.exec(clause))) {
+      const condition = clause.slice(match.index + match[0].length).trimStart().match(triggerWords);
+      if (condition) triggers.add(names[condition[1]]);
+      else all = true;
+    }
+    const shortNegative = /\b(?:not|never)\s+(?:when|on|if)\s+(?:(?:it|the bomb|the object)\s+is\s+)?(touched|clicked|destroyed|hurt)\b/g;
+    while ((match = shortNegative.exec(clause))) triggers.add(names[match[1]]);
+  }
+  return { all: all, triggers: triggers };
+}
+
+// Restrict the bomb preset only when the explosion itself has an explicit
+// exclusion or an exclusive trigger.
+function excludesPresetDestroyed(text, trigger) {
+  return actionClause(text, "explode").some(function (clause) {
+    if (/\b(?:not|never)\s+(?:explodes?\s+)?(?:when|on|if)\s+(?:(?:it|the bomb)\s+is\s+)?destroyed\b/.test(clause)) return true;
+    const exclusive = /\b(?:only\s+(?:explodes?\s+)?|explodes?\s+only\s+)(?:when|on|if)\b/.test(clause);
+    return exclusive && trigger !== "destroyed";
+  });
+}
+
 // Preserve trait defaults while applying conditions grounded in the request.
 export function askedFor(data, text) {
   const t = " " + text.toLowerCase() + " ";
@@ -472,6 +511,11 @@ export function askedFor(data, text) {
   (data.traits || []).forEach(function (name) {
     if (traits[name] && mentions(t, traitWords[name])) addTrait(behavior, traits[name]);
   });
+  // Keep track of destroyed reactions supplied by object presets. They allow
+  // chain reactions even when the prompt requests a separate activation trigger.
+  const presetDestroyed = new Set(behavior.reactions.filter(function (reaction) {
+    return reaction.when === "destroyed";
+  }));
   const move = data.move || still;
   if (move.type !== "none" && words[move.type] && mentions(t, words[move.type])) behavior.move = move;
   (data.effects || []).forEach(function (effect) {
@@ -496,12 +540,17 @@ export function askedFor(data, text) {
   // A preset can be used without an explicit trigger, but a model-generated
   // action still needs grounding in the request.
   const timerCount = behavior.reactions.filter(function (r) { return r.when === "timer"; }).length;
+  const blockedExplosions = excludedExplosions(t);
   const seen = new Set();
   behavior.reactions = behavior.reactions.filter(function (reaction) {
     const key = reaction.when + " " + reaction.do;
     if (seen.has(key) || negatedAction(t, reaction.do)) return false;
+    if (reaction.do === "explode" &&
+        (blockedExplosions.all || blockedExplosions.triggers.has(reaction.when))) return false;
     const trigger = requestedTrigger(t, reaction.do);
-    if (trigger && trigger !== reaction.when) return false;
+    const destroyedPreset = presetDestroyed.has(reaction);
+    if (destroyedPreset && excludesPresetDestroyed(t, trigger)) return false;
+    if (trigger && trigger !== reaction.when && !destroyedPreset) return false;
     if (reaction.when === "timer" && !trigger && actionClause(t, reaction.do).some(function (clause) {
       return /\b(?:when|whenever|if|unless)\b/.test(clause);
     })) return false;
